@@ -54,7 +54,6 @@ services:
       REDIS_HOST: cache
       REDIS_PORT: 6379
       APP_PORT: ${APP_PORT:-8080}
-      APP_ENV: ${APP_ENV:-development}
       TZ: ${TZ:-Asia/Taipei}
     ports:
       - "${APP_PORT:-8080}:8080"
@@ -65,6 +64,30 @@ services:
         condition: service_healthy
     volumes:
       - ./app:/app 
+    networks:
+      - iot-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # 資料產生服務
+  seeder:
+    build:
+      context: .
+      dockerfile: seeder/Dockerfile
+    container_name: iot-seeder
+    environment:
+      API_URL: http://app:8080
+      NUM_DEVICES: ${NUM_DEVICES:-8}          # 模擬設備數量
+      INTERVAL_SECONDS: ${INTERVAL_SECONDS:-7} # 發送間隔
+      TZ: ${TZ:-Asia/Taipei}
+    depends_on:
+      app:
+        condition: service_started  # 等待 app 服務啟動
     networks:
       - iot-network
     restart: unless-stopped
