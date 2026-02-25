@@ -2,7 +2,6 @@ package main
 
 import (
 	"log"
-	"os"
 
 	"iot-data-collection/app/internal/config"
 	"iot-data-collection/app/internal/database"

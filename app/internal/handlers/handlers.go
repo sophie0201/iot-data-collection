@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"time"
@@ -222,8 +223,20 @@ func (h *Handlers) GetDeviceLatest(c *gin.Context) {
 		return
 	}
 
+	ctx := c.Request.Context()
 	cacheKey := "device_metric:" + deviceID + ":latest"
-	_ = cacheKey // 暫時不使用，避免編譯錯誤
+
+	cached, err := h.rdb.Get(ctx, cacheKey).Result()
+	if err == nil {
+		var data models.DeviceMetric
+		if jsonErr := json.Unmarshal([]byte(cached), &data); jsonErr == nil {
+			c.JSON(http.StatusOK, gin.H{
+				"data":   data,
+				"source": "cache",
+			})
+			return
+		}
+	}
 
 	query := `
 		SELECT id, device_id, voltage, current, temperature, status, timestamp, created_at 
@@ -234,7 +247,7 @@ func (h *Handlers) GetDeviceLatest(c *gin.Context) {
 	`
 
 	var data models.DeviceMetric
-	err := h.db.QueryRow(query, deviceID).Scan(
+	err = h.db.QueryRow(query, deviceID).Scan(
 		&data.ID, &data.DeviceID, &data.Voltage, &data.Current,
 		&data.Temperature, &data.Status, &data.Timestamp, &data.CreatedAt)
 	if err != nil {
@@ -247,13 +260,18 @@ func (h *Handlers) GetDeviceLatest(c *gin.Context) {
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "無法取得資料",
-			"details": err.Error(),
 		})
 		return
 	}
 
+	if jsonBytes, jsonErr := json.Marshal(data); jsonErr == nil {
+		// TTL 設 60 秒
+		h.rdb.Set(ctx, cacheKey, string(jsonBytes), 60*time.Second)
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"data": data,
+		"source": "database",
 	})
 }
 
@@ -344,7 +362,7 @@ func (h *Handlers) GetRedisKeys(c *gin.Context) {
 		"cursor":     cursor,
 		"has_more":   hasMore,
 		"limit":      limit,
-		"scanned":    scannedCount
+		"scanned":    scannedCount,
 	})
 }
 
