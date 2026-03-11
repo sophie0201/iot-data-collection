@@ -1,0 +1,47 @@
+# 環境變數檔案
+.env
+.env.local
+.env.*.local
+
+# 日誌檔案
+*.log
+logs/
+*.log.*
+
+# 作業系統檔案
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE 設定
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 建置檔案
+dist/
+build/
+*.egg-info/
+
+# Docker
+.dockerignore
+
+# 資料庫檔案
+*.db
+*.sqlite
+*.sqlite3
+
+# 暫存檔案
+tmp/
+temp/
+*.tmp
+
+# 個人筆記
+notes/
+

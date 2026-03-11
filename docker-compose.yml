@@ -1,0 +1,102 @@
+version: '3.8'
+
+services:
+  # PostgreSQL
+  database:
+    image: postgres:15-alpine
+    container_name: iot-database
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: ${POSTGRES_DB:-iot_db}
+      TZ: ${TZ:-Asia/Taipei}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-user} -d ${POSTGRES_DB:-iot_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - iot-network
+
+  # Redis
+  cache:
+    image: redis:7-alpine
+    container_name: iot-cache
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - iot-network
+
+  # 應用程式服務
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: iot-app
+    environment:
+      POSTGRES_HOST: database
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: ${POSTGRES_DB:-iot_db}
+      REDIS_HOST: cache
+      REDIS_PORT: 6379
+      APP_PORT: ${APP_PORT:-8080}
+      TZ: ${TZ:-Asia/Taipei}
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    depends_on:
+      database:
+        condition: service_healthy
+      cache:
+        condition: service_healthy
+    volumes:
+      - ./app:/app 
+    networks:
+      - iot-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # 資料產生服務
+  seeder:
+    build:
+      context: .
+      dockerfile: seeder/Dockerfile
+    container_name: iot-seeder
+    environment:
+      API_URL: http://app:8080
+      NUM_DEVICES: ${NUM_DEVICES:-8}          # 模擬設備數量
+      INTERVAL_SECONDS: ${INTERVAL_SECONDS:-7} # 發送間隔
+      TZ: ${TZ:-Asia/Taipei}
+    depends_on:
+      app:
+        condition: service_started  # 等待 app 服務啟動
+    networks:
+      - iot-network
+    restart: unless-stopped
+
+# 資料卷（持久化資料）
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  iot-network:
+    driver: bridge
