@@ -10,7 +10,10 @@ import (
 )
 
 func main() {
-	cfg := config.Load()
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("設定檔驗證失敗: %v", err)
+	}
 
 	db, err := database.NewPostgresConnection(cfg)
 	if err != nil {

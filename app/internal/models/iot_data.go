@@ -26,8 +26,3 @@ type DeviceListResponse struct {
 	LastUpdated  time.Time `json:"last_updated"`
 	LatestStatus string    `json:"latest_status"`
 }
-
-type SetRedisValueRequest struct {
-	Value string `json:"value" binding:"required"`
-	TTL   int    `json:"ttl,omitempty"`
-}
