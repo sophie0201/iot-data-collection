@@ -4,15 +4,19 @@ import (
 	"database/sql"
 
 	"iot-data-collection/app/internal/handlers"
+	"iot-data-collection/app/internal/interfaces"
 	"iot-data-collection/app/internal/redis"
+	"iot-data-collection/app/internal/service"
 
 	"github.com/gin-gonic/gin"
 	redisdriver "github.com/redis/go-redis/v9"
 )
 
-func SetupRouter(db *sql.DB, rdb *redisdriver.Client) *gin.Engine {
+func SetupRouter(db *sql.DB, rdb *redisdriver.Client, metricQueue interfaces.MetricQueue) *gin.Engine {
 	r := gin.Default()
-	h := handlers.NewHandlers(db, redis.NewRedisAdapter(rdb))
+	redisAdapter := redis.NewRedisAdapter(rdb)
+	metricSvc := service.NewDeviceMetricService(db, redisAdapter, metricQueue)
+	h := handlers.NewHandlers(db, redisAdapter, metricSvc)
 
 	r.GET("/health", h.HealthCheck)
 
