@@ -16,7 +16,10 @@ func SetupRouter(db *sql.DB, rdb *redisdriver.Client, metricQueue interfaces.Met
 	r := gin.Default()
 	redisAdapter := redis.NewRedisAdapter(rdb)
 	metricSvc := service.NewDeviceMetricService(db, redisAdapter, metricQueue)
-	h := handlers.NewHandlers(db, redisAdapter, metricSvc)
+	h := &handlers.Handlers{
+		HealthHandler: handlers.NewHealthHandler(db, redisAdapter),
+		MetricSvc:     metricSvc,
+	}
 
 	r.GET("/health", h.HealthCheck)
 

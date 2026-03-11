@@ -33,3 +33,7 @@ type MetricTask struct {
 type MetricQueue interface {
 	Push(ctx context.Context, task *MetricTask) error
 }
+
+type HealthHandler interface {
+	Check(ctx context.Context) error
+}

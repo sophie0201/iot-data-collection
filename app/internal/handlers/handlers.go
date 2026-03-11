@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -13,41 +15,51 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+var (
+	ErrDBUnhealthy    = errors.New("database connection failed")
+	ErrRedisUnhealthy = errors.New("redis connection failed")
+)
+
+type healthHandler struct {
+	db  interfaces.DBClient
+	rdb interfaces.RedisClient
+}
+
+func NewHealthHandler(db interfaces.DBClient, rdb interfaces.RedisClient) interfaces.HealthHandler {
+	return &healthHandler{db: db, rdb: rdb}
+}
+
+func (hh *healthHandler) Check(ctx context.Context) error {
+	if err := hh.db.Ping(); err != nil {
+		return fmt.Errorf("%w: %v", ErrDBUnhealthy, err)
+	}
+	if err := hh.rdb.Ping(ctx); err != nil {
+		return fmt.Errorf("%w: %v", ErrRedisUnhealthy, err)
+	}
+	return nil
+}
+
 type Handlers struct {
-	db       interfaces.DBClient
-	rdb      interfaces.RedisClient
-	metricSvc service.DeviceMetricService
+	HealthHandler interfaces.HealthHandler
+	MetricSvc     service.DeviceMetricService
 }
 
-func NewHandlers(db interfaces.DBClient, rdb interfaces.RedisClient, metricSvc service.DeviceMetricService) *Handlers {
-	return &Handlers{
-		db:       db,
-		rdb:      rdb,
-		metricSvc: metricSvc,
-	}
-}
-
-// HealthCheck 檢查 DB、Redis 連線狀態
 func (h *Handlers) HealthCheck(c *gin.Context) {
-	if err := h.db.Ping(); err != nil {
+	err := h.HealthHandler.Check(c.Request.Context())
+	if err != nil {
+		msg := "服務異常"
+		if errors.Is(err, ErrDBUnhealthy) {
+			msg = "資料庫連線失敗"
+		} else if errors.Is(err, ErrRedisUnhealthy) {
+			msg = "Redis 連線失敗"
+		}
 		c.JSON(http.StatusServiceUnavailable, gin.H{
 			"status":  "unhealthy",
-			"message": "資料庫連線失敗",
+			"message": msg,
 			"error":   err.Error(),
 		})
 		return
 	}
-
-	ctx := c.Request.Context()
-	if err := h.rdb.Ping(ctx); err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{
-			"status":  "unhealthy",
-			"message": "Redis 連線失敗",
-			"error":   err.Error(),
-		})
-		return
-	}
-
 	c.JSON(http.StatusOK, gin.H{
 		"status":    "healthy",
 		"message":   "服務正常運作",
@@ -80,7 +92,7 @@ func (h *Handlers) CreateDeviceMetric(c *gin.Context) {
 		Status:      req.Status,
 		Timestamp:   req.Timestamp,
 	}
-	err := h.metricSvc.SubmitMetric(c.Request.Context(), in)
+	err := h.MetricSvc.SubmitMetric(c.Request.Context(), in)
 	if err != nil {
 		if errors.Is(err, service.ErrInvalidTimestamp) {
 			c.JSON(http.StatusBadRequest, gin.H{
@@ -125,7 +137,7 @@ func (h *Handlers) GetDeviceMetrics(c *gin.Context) {
 		Limit:     limit,
 		Offset:    offset,
 	}
-	list, err := h.metricSvc.GetMetrics(c.Request.Context(), in)
+	list, err := h.MetricSvc.GetMetrics(c.Request.Context(), in)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "無法取得資料",
@@ -149,7 +161,7 @@ func (h *Handlers) GetDeviceLatest(c *gin.Context) {
 		return
 	}
 
-	result, err := h.metricSvc.GetLatest(c.Request.Context(), deviceID)
+	result, err := h.MetricSvc.GetLatest(c.Request.Context(), deviceID)
 	if err != nil {
 		if errors.Is(err, service.ErrDeviceNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{
@@ -170,7 +182,7 @@ func (h *Handlers) GetDeviceLatest(c *gin.Context) {
 
 // GetDevices 列出所有設備
 func (h *Handlers) GetDevices(c *gin.Context) {
-	list, err := h.metricSvc.ListDevices(c.Request.Context())
+	list, err := h.MetricSvc.ListDevices(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "無法取得設備清單",
