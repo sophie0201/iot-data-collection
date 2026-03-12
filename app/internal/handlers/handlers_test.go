@@ -7,12 +7,17 @@ import (
 	"testing"
 
 	"iot-data-collection/app/internal/mocks"
+	"iot-data-collection/app/internal/service"
 
 	"github.com/gin-gonic/gin"
 )
 
 func TestHealthCheck_Healthy(t *testing.T) {
-	h := NewHandlers(&mocks.MockDB{}, &mocks.MockRedis{})
+	metricSvc := service.NewDeviceMetricService(&mocks.MockDB{}, &mocks.MockRedis{}, &mocks.MockMetricQueue{})
+	h := &Handlers{
+		HealthHandler: NewHealthHandler(&mocks.MockDB{}, &mocks.MockRedis{}),
+		MetricSvc:     metricSvc,
+	}
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -25,9 +30,13 @@ func TestHealthCheck_Healthy(t *testing.T) {
 }
 
 func TestHealthCheck_RedisDown(t *testing.T) {
-	h := NewHandlers(&mocks.MockDB{}, &mocks.MockRedis{
-		PingErr: errors.New("redis連線失敗"),
-	})
+	metricSvc := service.NewDeviceMetricService(&mocks.MockDB{}, &mocks.MockRedis{}, &mocks.MockMetricQueue{})
+	h := &Handlers{
+		HealthHandler: NewHealthHandler(&mocks.MockDB{}, &mocks.MockRedis{
+			PingErr: errors.New("redis連線失敗"),
+		}),
+		MetricSvc: metricSvc,
+	}
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)

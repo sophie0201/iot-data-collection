@@ -110,8 +110,8 @@ func (d *DeviceSimulator) SendMetric(metric DeviceMetricRequest) error {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("API 回應錯誤: status code %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("API 回應錯誤: status code %d (預期 202 或 201)", resp.StatusCode)
 	}
 
 	return nil

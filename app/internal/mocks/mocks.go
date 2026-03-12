@@ -1,10 +1,11 @@
 package mocks
 
 import (
-	"time"
 	"context"
-    "database/sql"
+	"database/sql"
+	"time"
 
+	"iot-data-collection/app/internal/interfaces"
 )
 
 // MockDB 模擬資料庫操作
@@ -57,5 +58,14 @@ func (m *MockRedis) Set(ctx context.Context, key string, value interface{}, expi
 
 func (m *MockRedis) Del(ctx context.Context, keys ...string) error {
 	return m.DelErr
+}
+
+// MockMetricQueue 模擬 MetricQueue，用於測試
+type MockMetricQueue struct {
+	PushErr error
+}
+
+func (m *MockMetricQueue) Push(ctx context.Context, task *interfaces.MetricTask) error {
+	return m.PushErr
 }
 

@@ -1,50 +1,65 @@
 package handlers
 
 import (
-	"database/sql"
-	"encoding/json"
+	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
 
 	"iot-data-collection/app/internal/interfaces"
 	"iot-data-collection/app/internal/models"
+	"iot-data-collection/app/internal/service"
 
 	"github.com/gin-gonic/gin"
 )
 
-type Handlers struct {
-    db  interfaces.DBClient
-    rdb interfaces.RedisClient
+var (
+	ErrDBUnhealthy    = errors.New("database connection failed")
+	ErrRedisUnhealthy = errors.New("redis connection failed")
+)
+
+type healthHandler struct {
+	db  interfaces.DBClient
+	rdb interfaces.RedisClient
 }
 
-func NewHandlers(db interfaces.DBClient, rdb interfaces.RedisClient) *Handlers {
-	return &Handlers{
-		db:  db,
-		rdb: rdb,
+func NewHealthHandler(db interfaces.DBClient, rdb interfaces.RedisClient) interfaces.HealthHandler {
+	return &healthHandler{db: db, rdb: rdb}
+}
+
+func (hh *healthHandler) Check(ctx context.Context) error {
+	if err := hh.db.Ping(); err != nil {
+		return fmt.Errorf("%w: %v", ErrDBUnhealthy, err)
 	}
+	if err := hh.rdb.Ping(ctx); err != nil {
+		return fmt.Errorf("%w: %v", ErrRedisUnhealthy, err)
+	}
+	return nil
+}
+
+type Handlers struct {
+	HealthHandler interfaces.HealthHandler
+	MetricSvc     service.DeviceMetricService
 }
 
 func (h *Handlers) HealthCheck(c *gin.Context) {
-	if err := h.db.Ping(); err != nil {
+	err := h.HealthHandler.Check(c.Request.Context())
+	if err != nil {
+		msg := "服務異常"
+		if errors.Is(err, ErrDBUnhealthy) {
+			msg = "資料庫連線失敗"
+		} else if errors.Is(err, ErrRedisUnhealthy) {
+			msg = "Redis 連線失敗"
+		}
 		c.JSON(http.StatusServiceUnavailable, gin.H{
 			"status":  "unhealthy",
-			"message": "資料庫連線失敗",
+			"message": msg,
 			"error":   err.Error(),
 		})
 		return
 	}
-
-	ctx := c.Request.Context()
-	if err := h.rdb.Ping(ctx); err != nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{
-			"status":  "unhealthy",
-			"message": "Redis 連線失敗",
-			"error":   err.Error(),
-		})
-		return
-	}
-
 	c.JSON(http.StatusOK, gin.H{
 		"status":    "healthy",
 		"message":   "服務正常運作",
@@ -52,12 +67,11 @@ func (h *Handlers) HealthCheck(c *gin.Context) {
 	})
 }
 
+// CreateDeviceMetric 接收設備 metric，驗證後交由 Service 非同步處理
 func (h *Handlers) CreateDeviceMetric(c *gin.Context) {
 	deviceID := c.Param("deviceId")
 	if deviceID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "deviceId 參數不能為空",
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "deviceId 參數不能為空"})
 		return
 	}
 
@@ -70,120 +84,60 @@ func (h *Handlers) CreateDeviceMetric(c *gin.Context) {
 		return
 	}
 
-	var timestamp time.Time
-	if req.Timestamp != "" {
-		var err error
-		timestamp, err = time.Parse(time.RFC3339, req.Timestamp)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "無效的時間格式，請使用 RFC3339 格式（例如：2024-01-01T12:00:00Z）",
-			})
-			return
-		}
-	} else {
-		timestamp = time.Now()
-	}
-
-	query := `
-		INSERT INTO device_metrics (device_id, voltage, current, temperature, status, timestamp)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		RETURNING id, created_at
-	`
-
-	var id int
-	var createdAt time.Time
-	err := h.db.QueryRow(query, deviceID, req.Voltage, req.Current, req.Temperature, req.Status, timestamp).
-		Scan(&id, &createdAt)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "無法建立資料",
-			"details": err.Error(),
-		})
-		return
-	}
-
-	ctx := c.Request.Context()
-	cacheKey := "device_metric:" + deviceID + ":latest"
-	h.rdb.Del(ctx, cacheKey)
-
-	data := models.DeviceMetric{
-		ID:          id,
+	in := service.SubmitMetricInput{
 		DeviceID:    deviceID,
 		Voltage:     req.Voltage,
 		Current:     req.Current,
 		Temperature: req.Temperature,
 		Status:      req.Status,
-		Timestamp:   timestamp,
-		CreatedAt:   createdAt,
+		Timestamp:   req.Timestamp,
 	}
-
-	c.JSON(http.StatusCreated, gin.H{
-		"message": "資料建立成功",
-		"data":    data,
-	})
-}
-
-func (h *Handlers) GetDeviceMetrics(c *gin.Context) {
-	deviceID := c.Param("deviceId")
-	if deviceID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "deviceId 參數不能為空",
+	err := h.MetricSvc.SubmitMetric(c.Request.Context(), in)
+	if err != nil {
+		if errors.Is(err, service.ErrInvalidTimestamp) {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "無效的時間格式，請使用 RFC3339 格式（例如：2024-01-01T12:00:00Z）",
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "無法加入處理佇列",
+			"details": err.Error(),
 		})
 		return
 	}
 
-	startTimeStr := c.Query("start_time")
-	endTimeStr := c.Query("end_time")
-	limitStr := c.DefaultQuery("limit", "100")
-	offsetStr := c.DefaultQuery("offset", "0")
+	c.JSON(http.StatusAccepted, gin.H{
+		"message":   "資料已接受，將於背景處理",
+		"device_id": deviceID,
+	})
+}
 
-	limit, _ := strconv.Atoi(limitStr)
-	if limit <= 0 || limit > 1000 {
-		limit = 100 // 限制最多 1000 筆，預設 100 筆
-	}
-	offset, _ := strconv.Atoi(offsetStr)
-	if offset < 0 {
-		offset = 0
-	}
-
-	query := `
-		SELECT id, device_id, voltage, current, temperature, status, timestamp, created_at 
-		FROM device_metrics 
-		WHERE device_id = $1
-	`
-	args := []interface{}{deviceID}
-	argIndex := 2
-
-	if startTimeStr != "" {
-		startTime, err := time.Parse(time.RFC3339, startTimeStr)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "無效的 start_time 格式，請使用 RFC3339 格式",
-			})
-			return
-		}
-		query += " AND timestamp >= $" + strconv.Itoa(argIndex)
-		args = append(args, startTime)
-		argIndex++
+// GetDeviceMetrics 查詢設備歷史 metrics
+func (h *Handlers) GetDeviceMetrics(c *gin.Context) {
+	deviceID := c.Param("deviceId")
+	if deviceID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "deviceId 參數不能為空"})
+		return
 	}
 
-	if endTimeStr != "" {
-		endTime, err := time.Parse(time.RFC3339, endTimeStr)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "無效的 end_time 格式，請使用 RFC3339 格式",
-			})
-			return
-		}
-		query += " AND timestamp <= $" + strconv.Itoa(argIndex)
-		args = append(args, endTime)
-		argIndex++
+	startTime, endTime, err := parseTimeRange(c.Query("start_time"), c.Query("end_time"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "無效的 start_time 或 end_time 格式，請使用 RFC3339 格式"})
+		return
 	}
 
-	query += " ORDER BY timestamp DESC LIMIT $" + strconv.Itoa(argIndex) + " OFFSET $" + strconv.Itoa(argIndex+1)
-	args = append(args, limit, offset)
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
+	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
 
-	rows, err := h.db.Query(query, args...)
+	in := service.GetMetricsInput{
+		DeviceID:  deviceID,
+		StartTime: startTime,
+		EndTime:   endTime,
+		Limit:     limit,
+		Offset:    offset,
+	}
+	list, err := h.MetricSvc.GetMetrics(c.Request.Context(), in)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "無法取得資料",
@@ -191,101 +145,44 @@ func (h *Handlers) GetDeviceMetrics(c *gin.Context) {
 		})
 		return
 	}
-	defer rows.Close()
-
-	var dataList []models.DeviceMetric
-	for rows.Next() {
-		var data models.DeviceMetric
-		if err := rows.Scan(&data.ID, &data.DeviceID, &data.Voltage, &data.Current, 
-			&data.Temperature, &data.Status, &data.Timestamp, &data.CreatedAt); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error":   "讀取資料時發生錯誤",
-				"details": err.Error(),
-			})
-			return
-		}
-		dataList = append(dataList, data)
-	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"device_id": deviceID,
-		"count":     len(dataList),
-		"data":      dataList,
+		"count":     len(list),
+		"data":      list,
 	})
 }
 
+// GetDeviceLatest 取得設備最新一筆 metric
 func (h *Handlers) GetDeviceLatest(c *gin.Context) {
 	deviceID := c.Param("deviceId")
 	if deviceID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "deviceId 參數不能為空",
-		})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "deviceId 參數不能為空"})
 		return
 	}
 
-	ctx := c.Request.Context()
-	cacheKey := "device_metric:" + deviceID + ":latest"
-
-	cached, err := h.rdb.Get(ctx, cacheKey)
-	if err == nil {
-		var data models.DeviceMetric
-		if jsonErr := json.Unmarshal([]byte(cached), &data); jsonErr == nil {
-			c.JSON(http.StatusOK, gin.H{
-				"data":   data,
-				"source": "cache",
-			})
-			return
-		}
-	}
-
-	query := `
-		SELECT id, device_id, voltage, current, temperature, status, timestamp, created_at 
-		FROM device_metrics 
-		WHERE device_id = $1
-		ORDER BY timestamp DESC
-		LIMIT 1
-	`
-
-	var data models.DeviceMetric
-	err = h.db.QueryRow(query, deviceID).Scan(
-		&data.ID, &data.DeviceID, &data.Voltage, &data.Current,
-		&data.Temperature, &data.Status, &data.Timestamp, &data.CreatedAt)
+	result, err := h.MetricSvc.GetLatest(c.Request.Context(), deviceID)
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, service.ErrDeviceNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{
-				"error":    "找不到該設備的資料",
+				"error":      "找不到該設備的資料",
 				"device_id": deviceID,
 			})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "無法取得資料",
-		})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "無法取得資料"})
 		return
 	}
 
-	if jsonBytes, jsonErr := json.Marshal(data); jsonErr == nil {
-		// TTL 設 60 秒
-		h.rdb.Set(ctx, cacheKey, string(jsonBytes), 60*time.Second)
-	}
-
 	c.JSON(http.StatusOK, gin.H{
-		"data": data,
-		"source": "database",
+		"data":   result.Data,
+		"source": result.Source,
 	})
 }
 
+// GetDevices 列出所有設備
 func (h *Handlers) GetDevices(c *gin.Context) {
-	query := `
-		SELECT DISTINCT ON (device_id) 
-			device_id, 
-			timestamp as last_updated,
-			status as latest_status
-		FROM device_metrics
-		ORDER BY device_id, timestamp DESC
-	`
-
-	rows, err := h.db.Query(query)
+	list, err := h.MetricSvc.ListDevices(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "無法取得設備清單",
@@ -293,23 +190,29 @@ func (h *Handlers) GetDevices(c *gin.Context) {
 		})
 		return
 	}
-	defer rows.Close()
-
-	var deviceList []models.DeviceListResponse
-	for rows.Next() {
-		var device models.DeviceListResponse
-		if err := rows.Scan(&device.DeviceID, &device.LastUpdated, &device.LatestStatus); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-				"error":   "讀取資料時發生錯誤",
-			"details": err.Error(),
-			})
-			return
-		}
-		deviceList = append(deviceList, device)
-	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"count":  len(deviceList),
-		"devices": deviceList,
+		"count":   len(list),
+		"devices": list,
 	})
+}
+
+// parseTimeRange 解析 start_time、end_time，無效則回傳 error
+func parseTimeRange(startStr, endStr string) (*time.Time, *time.Time, error) {
+	var start, end *time.Time
+	if startStr != "" {
+		t, err := time.Parse(time.RFC3339, startStr)
+		if err != nil {
+			return nil, nil, err
+		}
+		start = &t
+	}
+	if endStr != "" {
+		t, err := time.Parse(time.RFC3339, endStr)
+		if err != nil {
+			return nil, nil, err
+		}
+		end = &t
+	}
+	return start, end, nil
 }
