@@ -171,7 +171,7 @@ func (s *deviceMetricServiceImpl) GetLatest(ctx context.Context, deviceID string
 			LIMIT 1
 		`
 		var data models.DeviceMetric
-		err2 := s.db.QueryRow(query, deviceID).Scan(
+		err2 = s.db.QueryRow(query, deviceID).Scan(
 			&data.ID, &data.DeviceID, &data.Voltage, &data.Current,
 			&data.Temperature, &data.Status, &data.Timestamp, &data.CreatedAt)
 		if err2 != nil {
